@@ -5,8 +5,7 @@
 // itself to /output/entry.txt (or $MAKEFUN_OUTPUT_DIR/entry.txt when set).
 // Deterministic: same bytes on every run. Stdlib only, no network.
 
-import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, copyFileSync, mkdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const CONFESSION =
@@ -38,14 +37,24 @@ const outPath = join(outDir, "entry.txt");
 // failing the atomic rename with ENOENT.
 mkdirSync(outDir, { recursive: true });
 
-// Atomic, world-readable write: temp file in the same directory, chmod
-// 0644 before the replace so the scorer can read it.
-const tmp = mkdtempSync(join(tmpdir(), "confession-"));
-const tmpFile = join(tmp, "entry.txt");
+// Atomic, world-readable write. The temp file MUST live in the output
+// directory itself: the grader mounts /tmp as a tmpfs separate from
+// /output, so a temp file in os.tmpdir() cannot be renamed onto /output
+// (EXDEV: cross-device link not permitted) and the run exits 1.
+// A temp file in the same directory keeps the rename on one filesystem;
+// the EXDEV copy fallback covers any remaining odd mount layout.
+const tmpFile = join(outDir, `.entry-${process.pid}.tmp`);
 try {
   writeFileSync(tmpFile, CONFESSION, "utf8");
   chmodSync(tmpFile, 0o644);
-  renameSync(tmpFile, outPath);
+  try {
+    renameSync(tmpFile, outPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EXDEV") throw err;
+    copyFileSync(tmpFile, outPath);
+    chmodSync(outPath, 0o644);
+    unlinkSync(tmpFile);
+  }
 } finally {
-  rmSync(tmp, { recursive: true, force: true });
+  rmSync(tmpFile, { force: true });
 }
